@@ -220,6 +220,10 @@ export class NFCReader extends EventEmitter {
     const sw1 = res[res.length - 2];
     const sw2 = res[res.length - 1];
     if (sw1 !== 0x90 || sw2 !== 0x00) {
+      // SW=6300 means the page is locked/write-protected
+      if (sw1 === 0x63 && sw2 === 0x00) {
+        throw new Error("This NFC tag has been locked. It cannot be erased or re-written.");
+      }
       throw new Error(
         `NTAG WRITE failed page ${page}: SW=${sw1.toString(16).padStart(2, "0")}${sw2.toString(16).padStart(2, "0")}`
       );
