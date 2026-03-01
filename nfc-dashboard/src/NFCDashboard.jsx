@@ -48,7 +48,7 @@ const RECORD_TYPES = [
 const STARTER_TEMPLATES = [
   { id: "t1", name: "Business Card", type: "vcard", records: [{ type: "vcard", value: { name: "Your Name", phone: "+1234567890", email: "you@email.com", org: "Squircle Labs" } }] },
   { id: "t2", name: "WiFi Guest", type: "wifi", records: [{ type: "wifi", value: { ssid: "GuestNetwork", password: "welcome123", encryption: "WPA2" } }] },
-  { id: "t3", name: "Website Link", type: "url", records: [{ type: "url", value: "https://squirclelabs.com" }] },
+  { id: "t3", name: "Website Link", type: "url", records: [{ type: "url", value: "https://squirclelabs.uk" }] },
   { id: "t4", name: "Portfolio", type: "url", records: [{ type: "url", value: "https://portfolio.dev" }] },
 ];
 
@@ -381,7 +381,7 @@ export default function NFCDashboard() {
           <div style={{ width: 34, height: 34, borderRadius: 10, background: T.accentGrad, display: "flex", alignItems: "center", justifyContent: "center", color: "#fff" }}>
             <Icons.nfcWaves size={18} />
           </div>
-          <span style={{ fontWeight: 700, fontSize: 16, color: T.text }}>NFC Tag Manager</span>
+          <span style={{ fontWeight: 700, fontSize: 20, color: T.text }}>Tappetizer</span>
           <span style={{ fontSize: 11, color: T.textMuted, marginLeft: 4 }}>by Squircle Labs</span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -552,7 +552,7 @@ export default function NFCDashboard() {
                     style={{ width: "100%", marginTop: 14, padding: "12px", borderRadius: 12, border: "none", cursor: "pointer", background: T.accentGrad, color: "#fff", fontSize: 14, fontWeight: 700, fontFamily: F, opacity: !tag ? 0.5 : 1, boxShadow: "0 6px 24px rgba(217,70,239,0.3)", transition: "all 0.15s", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}
                     onMouseEnter={e => { if (tag && !opInProgress) { e.currentTarget.style.transform = "translateY(-1px)"; e.currentTarget.style.boxShadow = "0 8px 32px rgba(217,70,239,0.4)"; }}}
                     onMouseLeave={e => { e.currentTarget.style.transform = "translateY(0)"; e.currentTarget.style.boxShadow = "0 6px 24px rgba(217,70,239,0.3)"; }}>
-                    {opInProgress === "write" ? "Writing\u2026" : <><Icons.write size={16} /> Write to Tag</>}
+                    {opInProgress === "write" ? "Writing\u2026" : <><Icons.write size={16} /> Tappetize!</>}
                   </button>
                 </div>
               </div>
