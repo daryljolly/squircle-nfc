@@ -1,0 +1,20 @@
+{
+  "name": "squircle-nfc-bridge",
+  "version": "1.0.0",
+  "description": "WebSocket bridge between NFC readers (ACR1252U) and the Squircle NFC Dashboard",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "squircle-nfc-bridge": "src/cli.js"
+  },
+  "scripts": {
+    "start": "node src/cli.js",
+    "dev": "node --watch src/cli.js"
+  },
+  "keywords": ["nfc", "pcsc", "acr1252u", "websocket", "ndef"],
+  "license": "MIT",
+  "dependencies": {
+    "nfc-pcsc": "^0.8.1",
+    "ws": "^8.16.0"
+  }
+}
