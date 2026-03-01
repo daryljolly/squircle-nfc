@@ -316,7 +316,9 @@ function encodeWiFi(value) {
 }
 
 function encodeGeo(value) {
-  const uri = `geo:${value.lat},${value.lng}`;
+  const lat = value.lat || "0";
+  const lng = value.lng || "0";
+  const uri = `geo:${lat},${lng}`;
   return encodeURL(uri);
 }
 

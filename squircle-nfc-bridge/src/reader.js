@@ -21,20 +21,24 @@ export class NFCReader extends EventEmitter {
   constructor() {
     super();
     this.nfc = new NFC();
-    this.reader = null;
+    this.readers = new Map();  // track all PC/SC interfaces
+    this.reader = null;        // the interface that has the active card
     this.card = null;
     this._setupNFC();
   }
 
   _setupNFC() {
     this.nfc.on("reader", (reader) => {
-      this.reader = reader;
-      this.emit("reader:connect", {
-        name: reader.reader.name,
-      });
+      const name = reader.reader.name;
+      this.readers.set(name, reader);
+      console.log(`[pcsc] interface registered: ${name}`);
+      this.emit("reader:connect", { name });
 
+      // When a card is detected on THIS interface, pin it as the active reader.
       reader.on("card", async (card) => {
+        this.reader = reader;  // pin to the interface that actually sees the tag
         this.card = card;
+        console.log(`[pcsc] card on ${name}  uid=${card.uid}`);
         try {
           const tagInfo = await this._readTagInfo(reader, card);
           this.emit("tag:connect", tagInfo);
@@ -53,8 +57,11 @@ export class NFCReader extends EventEmitter {
       });
 
       reader.on("end", () => {
-        this.reader = null;
-        this.card = null;
+        this.readers.delete(name);
+        if (this.reader === reader) {
+          this.reader = null;
+          this.card = null;
+        }
         this.emit("reader:disconnect");
       });
     });
@@ -65,7 +72,8 @@ export class NFCReader extends EventEmitter {
   }
 
   async _readTagInfo(reader, card) {
-    // Read capability container (CC) at page 3 to get capacity
+    // Read capability container (CC) at page 3
+    // nfc-pcsc reader.read() takes block/page number, not byte offset
     const cc = await reader.read(3, 4);
     const capacityByte = cc[2];
     const totalBytes = capacityByte * 8;
@@ -97,14 +105,16 @@ export class NFCReader extends EventEmitter {
 
   async _readNDEFData(reader) {
     // NDEF data starts at page 4 on NTAG chips
-    // Read in 4-page (16 byte) chunks
+    // nfc-pcsc reader.read() takes block/page number, not byte offset
     const chunks = [];
-    let offset = 4;
-    const maxPages = 40; // Read up to 160 bytes to find NDEF message
+    const startPage = 4;
+    const pagesPerRead = 4; // 4 pages × 4 bytes = 16 bytes per read
+    const bytesPerRead = 16;
+    const maxReads = 10; // up to 40 pages (160 bytes)
 
-    for (let i = 0; i < maxPages; i += 4) {
+    for (let i = 0; i < maxReads; i++) {
       try {
-        const data = await reader.read(offset + i, 16);
+        const data = await reader.read(startPage + i * pagesPerRead, bytesPerRead);
         chunks.push(data);
       } catch {
         break;
@@ -153,6 +163,70 @@ export class NFCReader extends EventEmitter {
     return parts.join(":");
   }
 
+  // ─── NTAG page write via UPDATE BINARY ───────────────
+
+  /**
+   * Write a single 4-byte page to the NTAG via UPDATE BINARY.
+   *
+   * The ACR1252U firmware natively translates UPDATE BINARY into the
+   * correct NTAG WRITE command when P2 is the page number (not byte
+   * offset). nfc-pcsc's reader.write() also uses UPDATE BINARY but
+   * its transmit() wrapper gates on reader.card which the pcsclite
+   * polling loop may have cleared. We bypass the wrapper and call the
+   * raw pcsclite reader.transmit() directly.
+   *
+   * APDU: FF D6 00 <page> 04 <4 bytes>
+   *   FF    = CLA
+   *   D6    = INS (UPDATE BINARY)
+   *   00    = P1
+   *   <page> = P2: NTAG page number
+   *   04    = Lc (4 data bytes)
+   *   <4 bytes> = page data
+   *
+   * Response on success: 90 00
+   */
+  async _writeNTAGPage(reader, page, data) {
+    const apdu = Buffer.from([
+      0xFF, 0xD6, 0x00,
+      page & 0xFF,
+      0x04,
+      data[0] ?? 0x00, data[1] ?? 0x00, data[2] ?? 0x00, data[3] ?? 0x00,
+    ]);
+
+    console.log(`  [write] page ${page}  data=${data.toString("hex")}  apdu=${apdu.toString("hex")}`);
+
+    // Re-establish the PC/SC connection if nfc-pcsc's polling loop dropped it.
+    if (!reader.connection) {
+      console.log("  [write] PC/SC connection lost, reconnecting...");
+      await reader.connect();
+      console.log("  [write] reconnected, protocol:", reader.connection.protocol);
+    }
+
+    // Bypass nfc-pcsc's transmit() wrapper — it gates on reader.card which
+    // the polling loop may have cleared even though the physical tag is still
+    // on the reader. The raw pcsclite reader.transmit() has no such guard.
+    const rawReader = reader.reader;
+    const protocol = reader.connection.protocol;
+
+    const res = await new Promise((resolve, reject) => {
+      rawReader.transmit(apdu, 64, protocol, (err, response) => {
+        if (err) return reject(new Error(`NTAG WRITE transmit error page ${page}: ${err.message}`));
+        resolve(response);
+      });
+    });
+
+    console.log(`  [write] page ${page}  response=${res.toString("hex")}`);
+
+    // Check SW1 SW2 (last 2 bytes must be 90 00)
+    const sw1 = res[res.length - 2];
+    const sw2 = res[res.length - 1];
+    if (sw1 !== 0x90 || sw2 !== 0x00) {
+      throw new Error(
+        `NTAG WRITE failed page ${page}: SW=${sw1.toString(16).padStart(2, "0")}${sw2.toString(16).padStart(2, "0")}`
+      );
+    }
+  }
+
   // ─── Public API ─────────────────────────────────────
 
   get isReaderConnected() {
@@ -164,9 +238,15 @@ export class NFCReader extends EventEmitter {
   }
 
   async readTag() {
-    if (!this.reader || !this.card) {
-      throw new Error("No reader or tag available");
+    if (!this.reader) throw new Error("No reader connected");
+    if (!this.card) throw new Error("No tag present");
+
+    // Re-establish PC/SC connection if the polling loop dropped it
+    if (!this.reader.connection) {
+      console.log("[readTag] PC/SC connection lost, reconnecting...");
+      await this.reader.connect();
     }
+
     return this._readTagInfo(this.reader, this.card);
   }
 
@@ -174,22 +254,42 @@ export class NFCReader extends EventEmitter {
     if (!this.reader) throw new Error("No reader connected");
     if (!this.card) throw new Error("No tag present");
 
-    // Build TLV: 0x03 (NDEF) + length + data + 0xFE (terminator)
-    const tlv = Buffer.alloc(ndefBytes.length + 3);
-    tlv[0] = 0x03; // NDEF message TLV
-    tlv[1] = ndefBytes.length;
-    ndefBytes.copy(tlv, 2);
-    tlv[tlv.length - 1] = 0xFE; // Terminator
+    console.log(`[writeTag] NDEF message: ${ndefBytes.length} bytes  hex=${ndefBytes.toString("hex")}`);
 
-    // Write starting at page 4
-    const pageSize = 4;
-    for (let i = 0; i < tlv.length; i += pageSize) {
-      const page = 4 + i / pageSize;
-      const chunk = Buffer.alloc(pageSize);
-      tlv.copy(chunk, 0, i, Math.min(i + pageSize, tlv.length));
-      await this.reader.write(page, chunk, pageSize);
+    // Build TLV: 0x03 (NDEF) + length + data + 0xFE (terminator)
+    let tlv;
+    if (ndefBytes.length >= 0xFF) {
+      tlv = Buffer.alloc(ndefBytes.length + 5);
+      tlv[0] = 0x03;
+      tlv[1] = 0xFF;
+      tlv[2] = (ndefBytes.length >> 8) & 0xFF;
+      tlv[3] = ndefBytes.length & 0xFF;
+      ndefBytes.copy(tlv, 4);
+      tlv[tlv.length - 1] = 0xFE;
+    } else {
+      tlv = Buffer.alloc(ndefBytes.length + 3);
+      tlv[0] = 0x03;
+      tlv[1] = ndefBytes.length;
+      ndefBytes.copy(tlv, 2);
+      tlv[tlv.length - 1] = 0xFE;
     }
 
+    console.log(`[writeTag] TLV wrapped: ${tlv.length} bytes  hex=${tlv.toString("hex")}`);
+
+    // Write page-by-page starting at NTAG page 4 (first user data page).
+    // Uses raw NTAG WRITE via InCommunicateThru — page numbers, not byte offsets.
+    const startPage = 4;
+    const totalPages = Math.ceil(tlv.length / 4);
+    console.log(`[writeTag] Writing ${totalPages} pages starting at page ${startPage}`);
+
+    for (let i = 0; i < tlv.length; i += 4) {
+      const page = startPage + (i / 4);
+      const chunk = Buffer.alloc(4);
+      tlv.copy(chunk, 0, i, Math.min(i + 4, tlv.length));
+      await this._writeNTAGPage(this.reader, page, chunk);
+    }
+
+    console.log(`[writeTag] Done — ${tlv.length} bytes written to pages ${startPage}–${startPage + totalPages - 1}`);
     return { bytesWritten: tlv.length };
   }
 
@@ -197,10 +297,13 @@ export class NFCReader extends EventEmitter {
     if (!this.reader) throw new Error("No reader connected");
     if (!this.card) throw new Error("No tag present");
 
-    // Write empty NDEF TLV + terminator at page 4
-    const empty = Buffer.from([0x03, 0x00, 0xFE, 0x00]);
-    await this.reader.write(4, empty, 4);
+    console.log("[eraseTag] Writing empty NDEF TLV to page 4");
 
+    // Write empty NDEF TLV + terminator to page 4
+    const empty = Buffer.from([0x03, 0x00, 0xFE, 0x00]);
+    await this._writeNTAGPage(this.reader, 4, empty);
+
+    console.log("[eraseTag] Done");
     return { success: true };
   }
 
@@ -208,32 +311,27 @@ export class NFCReader extends EventEmitter {
     if (!this.reader) throw new Error("No reader connected");
     if (!this.card) throw new Error("No tag present");
 
-    // Set CC byte 3 (access bits) to read-only
-    // Read current CC
+    console.log("[lockTag] Setting CC access bits to read-only");
+
+    // Read current CC at page 3
     const cc = await this.reader.read(3, 4);
-    cc[3] = 0x0F; // Read-only access
+    cc[3] = 0x0F;
+    await this._writeNTAGPage(this.reader, 3, cc);
 
-    // Write updated CC
-    await this.reader.write(3, cc, 4);
-
-    // Set dynamic lock bits (pages vary by tag type)
-    // For NTAG21x, dynamic lock bytes are at the end of user memory
-    // This is a simplified version - full implementation would check tag type
+    // Set dynamic lock bits at end of user memory
     const lockBits = Buffer.from([0xFF, 0xFF, 0xFF, 0x00]);
     // NTAG213: page 40, NTAG215: page 130, NTAG216: page 226
-    // We'll try the common location first
     try {
-      await this.reader.write(40, lockBits, 4);
+      await this._writeNTAGPage(this.reader, 40, lockBits);
     } catch {
-      // Different tag type, try alternatives
       try {
-        await this.reader.write(130, lockBits, 4);
+        await this._writeNTAGPage(this.reader, 130, lockBits);
       } catch {
-        // Last resort
-        await this.reader.write(226, lockBits, 4);
+        await this._writeNTAGPage(this.reader, 226, lockBits);
       }
     }
 
+    console.log("[lockTag] Done");
     return { success: true };
   }
 
